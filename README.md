@@ -18,10 +18,10 @@ Creating a vanity address is a two step process:
 
 Checkout this repository on your machine with `Python 3.9` installed. It is recommended to use some computer with good GPU.
 
-Execute in `src/generator` and replace `<suffix>` with desired suffix name and `<owner>` with an address of a wallet that then could be used for deployment.
+Execute in `src/generator` and replace `<suffix>,<suffix2>` with desired suffix names and `<owner>` with an address of a wallet that then could be used for deployment.
 
 ```bash
-python3.9 run.py --end '<suffix>' -w -1 --case-sensitive <owner>
+python3.9 run.py --end '<suffix>,<suffix2>' -w -1 --case-sensitive <owner>
 ```
 
 Example output:
