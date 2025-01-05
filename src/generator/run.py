@@ -9,8 +9,8 @@ import argparse
 
 parser = argparse.ArgumentParser('vanity-generator', description='Generate beautiful wallet for TON on GPU using vanity contract')
 parser.add_argument('owner', help='An owner of vanity contract')
-parser.add_argument('--end', type=str, default='', help='Search in the end of address')
-parser.add_argument('--start', type=str, default='', help='Search in the start of address')
+parser.add_argument('--end', type=str, default='', help='Search in the end of address, separated by , or |')
+parser.add_argument('--start', type=str, default='', help='Search in the start of address, separated by , or |')
 parser.add_argument('-nb', action='store_true', default=False, help='Search for non-bouncable addresses')
 parser.add_argument('-t', action='store_true', default=False, help='Search for testnet addresses')
 parser.add_argument('--threads', type=int, help='Worker threads')
@@ -20,17 +20,21 @@ parser.add_argument('--case-sensitive', action='store_true', help='Search for ca
 parser.add_argument('--early-prefix', action='store_true', help='Check prefix starting from third character (subject to some address format restrictions, fourth by default)')
 parser.add_argument('--only-one', action='store_true', help='Stop when an address is found (runs until interrupted by default)')
 
-
 args = parser.parse_args()
 if not args.end and not args.start:
     parser.print_usage()
     print('vanity-generator: error: the following arguments are required: end or start')
     os._exit(0)
 
+def parse_parameters(param):
+    return [p.strip() for p in param.replace('|', ',').split(',') if p.strip()]
+
+start_patterns = parse_parameters(args.start)
+end_patterns = parse_parameters(args.end)
 
 OWNER = args.owner
 owner_decoded = base64.urlsafe_b64decode(OWNER)
-inner_base =  bytearray.fromhex('00840400') + owner_decoded[2:34]
+inner_base = bytearray.fromhex('00840400') + owner_decoded[2:34]
 
 BOUNCEABLE_TAG = 0x11
 NON_BOUNCEABLE_TAG = 0x51
@@ -44,34 +48,69 @@ flags <<= 8
 flags |= WORKCHAIN
 
 if not args.case_sensitive:
-    args.start = args.start.lower()
-    args.end = args.end.lower()
+    start_patterns = [p.lower() for p in start_patterns]
+    end_patterns = [p.lower() for p in end_patterns]
 
 start_offset = 3
 
 conditions = []
-kernel_conditions = []
+start_conditions = []
+end_conditions = []
 if args.early_prefix:
     conditions.append('early-prefix')
     start_offset = 2
 if args.case_sensitive:
     conditions.append('case-sensitive')
-if args.start:
-    conditions.append(f'starting with "{args.start}"')
-    for i, c in enumerate(args.start):
-        pos = i + start_offset
-        if args.case_sensitive:
-            kernel_conditions.append(f"result[{pos}] == '{c}'")
-        else:
-            kernel_conditions.append(f"(result[{pos}] == '{c}' || result[{pos}] == '{c.upper()}')")
-if args.end:
-    conditions.append(f'with "{args.end}" in the end')
-    for i, c in enumerate(args.end):
-        pos = 47 - len(args.end) + i + 1
-        if args.case_sensitive:
-            kernel_conditions.append(f"result[{pos}] == '{c}'")
-        else:
-            kernel_conditions.append(f"(result[{pos}] == '{c}' || result[{pos}] == '{c.upper()}')")
+if start_patterns:
+    conditions.append(f"starting with {start_patterns}")
+    start_conditions.append(
+        " || ".join(
+            [
+                "("
+                + " && ".join(
+                    [
+                        (
+                            f"result[{i + start_offset}] == '{c}'"
+                            if args.case_sensitive
+                            else f"(result[{i + start_offset}] == '{c}' || result[{i + start_offset}] == '{c.upper()}')"
+                        )
+                        for i, c in enumerate(pattern)
+                    ]
+                )
+                + ")"
+                for pattern in start_patterns
+            ]
+        )
+    )
+if end_patterns:
+    conditions.append(f"with {end_patterns} in the end")
+    end_conditions.append(
+        " || ".join(
+            [
+                "("
+                + " && ".join(
+                    [
+                        (
+                            f"result[{47 - len(pattern) + i + 1}] == '{c}'"
+                            if args.case_sensitive
+                            else f"(result[{47 - len(pattern) + i + 1}] == '{c}' || result[{47 - len(pattern) + i + 1}] == '{c.upper()}')"
+                        )
+                        for i, c in enumerate(pattern)
+                    ]
+                )
+                + ")"
+                for pattern in end_patterns
+            ]
+        )
+    )
+kernel_conditions = []
+if start_conditions and end_conditions:
+    kernel_conditions.append(f'(({" && ".join(start_conditions)}) && ({" && ".join(end_conditions)}))')
+elif start_conditions:
+    kernel_conditions.append(f'({" && ".join(start_conditions)})')
+elif end_conditions:
+    kernel_conditions.append(f'({" && ".join(end_conditions)})')
+
 
 print()
 print('Searching wallets', ', '.join(conditions))
@@ -79,7 +118,6 @@ print("Owner: ", OWNER)
 print("Flags: ", flags.to_bytes(2, 'big').hex())
 print("Kernel conditions:", ' && '.join(kernel_conditions))
 print()
-
 
 mf = cl.mem_flags
 n_found = 0
@@ -116,20 +154,20 @@ def solver(dev, context, queue, program):
     threads = args.threads or (dev.max_work_group_size * dev.max_compute_units)
     iterations = args.its
     program.hash_main(
-        queue, 
-        (threads,), 
-        None, 
+        queue,
+        (threads,),
+        None,
         np.int32(iterations),
         np.ushort(flags),
         np.int32(71),
         main_g,
         np.int32(68),
-        inner_g, 
+        inner_g,
         res_g
     ).wait()
     result = np.empty(2048, np.uint32)
     cl.enqueue_copy(queue, result, res_g).wait()
-    
+
     ps = list(np.where(result != 0xffffffff))[0]
     misses = 0
     if len(ps):
@@ -147,7 +185,7 @@ def solver(dev, context, queue, program):
             main[39:71] = hash1
 
             hs = hashlib.sha256(main[:71]).digest()
-    
+
             address = bytearray()
             address += flags.to_bytes(2, 'big') # flags
             address += hs
@@ -156,7 +194,9 @@ def solver(dev, context, queue, program):
             address[34] = crc[0]
             address[35] = crc[1]
             found = base64.urlsafe_b64encode(address).decode('utf-8')
-            if (len(args.end) > 0 and found.lower().endswith(args.end.lower())) or (len(args.start) > 0 and found[start_offset:].lower().startswith(args.start.lower())):
+
+            if any(found.lower().endswith(pattern) for pattern in end_patterns) or \
+               any(found[start_offset:].lower().startswith(pattern) for pattern in start_patterns):
                 print('Found: ', found, 'salt: ', salt_np.tobytes().hex())
                 with open('found.txt', 'a') as f:
                     f.write(f'{found} {salt_np.tobytes().hex()}\n')
@@ -166,7 +206,7 @@ def solver(dev, context, queue, program):
                 n_found += 1
             else:
                 misses += 1
-    print('Speed:', round(threads * iterations / (time.time() - start) / 1e6), 'Mh/s, miss: ' + str(misses) + ', found: ' + str(n_found)) 
+    print('Speed:', round(threads * iterations / (time.time() - start) / 1e6), 'Mh/s, miss: ' + str(misses) + ', found: ' + str(n_found))
 
 kernel_code = open(os.path.join(os.path.dirname(__file__), 'vanity.cl')).read()
 kernel_code = kernel_code.replace("<<CONDITION>>", ' && '.join(kernel_conditions))
@@ -199,4 +239,3 @@ except KeyboardInterrupt:
     print('Interrupted')
     stopped = True
     os._exit(0)
-        
