@@ -3,3 +3,4 @@ node_modules/
 build/
 dist/
 __pycache__/
+src/generator/found.txt
