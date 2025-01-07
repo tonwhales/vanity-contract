@@ -61,7 +61,9 @@ def build_kernel_conditions(start_patterns, end_patterns, start_offset, case_sen
             ]
             conditions.append("(" + " || ".join(chunk_conditions) + ")")
 
-    return " && ".join(conditions) if conditions else "true"
+    if not conditions:
+        raise ValueError("No patterns provided")
+    return " && ".join(conditions)
 
 def crc16(data):
     reg = 0
@@ -186,7 +188,7 @@ class VanityGenerator:
 
         for platform in platforms:
             devices = platform.get_devices(cl.device_type.GPU)
-            for i, dev in enumerate(devices, 1):
+            for _, dev in enumerate(devices, 1):
                 print(f"Using device: {dev.name}")
                 t = Thread(target=self.device_thread, args=(dev,))
                 threads.append(t)
